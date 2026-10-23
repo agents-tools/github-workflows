@@ -2,7 +2,8 @@
 
 Reusable validation, source policy, release publication and organization checks
 for Swift packages and Homebrew taps in the **agents-tools** and **skill-cli**
-families, maintained in `agents-tools/github-workflows`. Required Swift member checks are exactly **`policy / policy`** and
+families, maintained in `agents-tools/github-workflows`. Required Swift member
+checks are exactly **`policy / policy`** and
 **`validate / result`**.
 
 ## Job catalog
@@ -14,7 +15,7 @@ families, maintained in `agents-tools/github-workflows`. Required Swift member c
 | `format` | Strict recursive Swift formatting using the repository's `.swift-format`, on the last compiler. |
 | `linux` | Runs tests in each digest-pinned Swift Docker image. |
 | `apple` | Builds each generic iOS, tvOS, watchOS or visionOS destination, skipping plugin and macro validation for non-interactive CI. Optional tests download the SDK-matching runtime and create/delete a matching simulator. |
-| `docs` | Builds each target's DocC archive from its own module and extension symbol graphs, with warnings as errors. |
+| `docs` | Builds the whole package once, emitting public symbol graphs with extension blocks, then converts each target's DocC archive with warnings as errors. |
 | `demo` | Builds the release executable and checks a fresh terminal recording through the presentation action's recording-only mode. |
 | `commands` | Runs each repository command in its own job in the member checkout. |
 | `result` | Requires every declared job to succeed. Only undeclared optional jobs may be skipped; failures and cancellation fail the aggregate. |
@@ -26,9 +27,7 @@ families, maintained in `agents-tools/github-workflows`. Required Swift member c
 ## Configuration
 
 `swift-package.yml` has no inputs. The configuration is in the caller checkout.
-The [shared CI contract](https://github.com/swift-library/skills/blob/main/skills/swiftpm-github-release/references/shared-ci.md)
-owns the configuration reference; [the JSON Schema](schemas/swift-package.schema.json)
-enforces it. The table below is a quick reference to that contract.
+See [the JSON Schema](schemas/swift-package.schema.json).
 
 | Key | Meaning / default |
 | --- | --- |
@@ -37,11 +36,11 @@ enforces it. The table below is a quick reference to that contract.
 | `package_directory` | Package root inside the repository; default `.`. |
 | `test_configurations` | Nonempty list of `debug` and/or `release`; default `["debug"]`. |
 | `build_system` | `native` or `xcode`, passed to SwiftPM commands. Omission uses SwiftPM's default. |
-| `traits` | List of trait sets, e.g. `[["default"], [], ["Experimental", "default"]]`. `default` maps to SwiftPM `defaults`; an empty set disables defaults. Omission uses default traits. |
+| `traits` | List of trait sets, e.g. `[["default"], [], ["Experimental", "default"]]`. `default` enables SwiftPM default traits; an empty set disables them. Omission uses default traits. |
 | `environment` | String map exported to validation commands. The terminal script declares its own sandbox environment. |
 | `platforms.linux` | Nonempty array of `{name, image}` with `@sha256:<64 hex digits>` image references. |
 | `platforms.apple` | Nonempty array of `{name, platform, scheme, test?, runner?, xcode?}`. Platform is `iOS`, `tvOS`, `watchOS` or `visionOS`; test defaults to false. |
-| `docs` | `{targets}` for packages shipping DocC. Catalogs live under `Sources/<target>/*.docc`. Builds use default traits; specialized documentation preparation belongs in commands. |
+| `docs` | `{targets, traits?}` for packages shipping DocC. Catalogs live under each target path reported by SwiftPM. `traits` is one trait set for the documentation build, e.g. `["Experimental", "default"]`; omission uses default traits. |
 | `demo` | `{product, script?}`; script defaults to `.github/assets/terminal/script.yml`, relative to the repository. `recording.json` and optional `fixture/` live beside the script. |
 | `commands` | Nonempty `{name, run, runner?, xcode?}` array. Shell is Bash with `-euo pipefail`. Put repository checks in lowercase `scripts/`. |
 | `timeout_minutes` | Integer from 1 through 360; default 45. |
@@ -49,6 +48,10 @@ enforces it. The table below is a quick reference to that contract.
 Apple and command entries default to the last compiler's runner and toolchain.
 An explicit Xcode override uses that Xcode's bundled Swift. Docs and demo also
 use the last compiler. Package and script paths must stay inside the checkout.
+
+The documentation build emits graphs for library and executable modules.
+Each declared target's DocC conversion receives only its main graph and
+extension graphs. A missing main graph fails the job and names the target.
 
 When `release.json` exists, the lowest actual compiler must match its
 `minimum_swift` (major/minor declarations accept patch updates). Each compiler
@@ -67,16 +70,17 @@ publishes them.
 }
 ```
 
-The [member examples](docs/member-configuration.md) map `agents-tools/core`,
-`agents-tools/cli` and `skill-cli/cli` to this configuration, including their
-smoke checks and terminal demos. `fixtures/members/` contains the shared
-Swift-family schema examples.
-
 ## Calling validation and policy
+
+Swift members such as `agents-tools/core`, `agents-tools/cli` and `skill-cli/cli`
+use the same configuration reference and workflow calls:
 
 ```yaml
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
 permissions:
   contents: read
   actions: read
@@ -161,13 +165,35 @@ running and queued releases.
 
 ## Organization checks
 
-Inputs are `organization`, `standard-repository`, `standard-revision` (a full
-commit SHA), `members` (default `all`, or newline-separated names), and `mode`
-(`public` or `online`, default `public`). The standard repository supplies
-`MAINTENANCE.md` with its `settings-declaration` JSON block and
+Inputs are `organization`, `declaration-repository`, `declaration-revision`,
+`catalog-repository`, `catalog-revision`, `members` (default `all`, or
+newline-separated names), and `mode` (`public` or `online`, default `public`).
+The declaration repository supplies `MAINTENANCE.md` with its
+`settings-declaration` JSON block. The catalog repository supplies
 `profile/catalog.json` with organization/group membership and About text.
+Each `catalog-*` input defaults to its corresponding `declaration-*` input.
+Both resolved revisions must be full commit SHAs. Only declaration members in
+the requested organization are checked; members in other organizations are ignored.
 
-Public mode compares the full active public membership and About descriptions.
+`swift-library` and `agents-tools` use their own `.github` repository for both
+inputs. `skill-cli` uses a pinned `agents-tools/.github` declaration and its own
+catalog at the commit under test:
+
+```yaml
+jobs:
+  organization:
+    permissions:
+      contents: read
+    uses: agents-tools/github-workflows/.github/workflows/organization.yml@<full-sha> # vX.Y.Z
+    with:
+      organization: skill-cli
+      declaration-repository: agents-tools/.github
+      declaration-revision: <full-declaration-sha>
+      catalog-repository: skill-cli/.github
+      catalog-revision: ${{ github.sha }}
+```
+
+Public mode compares active public, non-fork membership and About descriptions.
 Member selection narrows About/settings checks but still detects new members.
 Online mode additionally reads merge settings, token permissions, vulnerability
 reporting and complete branch/tag rulesets. Unknown observations fail with exit
@@ -192,39 +218,21 @@ files work from `swift-library/github-workflows` and
 `agents-tools/github-workflows`. Validation requires `actions: read` to retrieve
 compiler-version artifacts for the aggregate check.
 
+## Terminal demo
+
 The presentation action has one reference, in `swift-package.yml`. Demo fixture
 setup reads that pin with `scripts/check-ci.py --demo-revision` and installs the
 toolchain's declared Node version and locked dependencies. Demo checks use
 `recording-only: true` to compare the committed recording with fresh CLI output.
+The member's `environment` applies to the demo build. The recorder constructs
+the child's environment from its sandbox defaults and the terminal script's
+`env`, so every environment value needed to reproduce the demo belongs in that
+script.
 
-## Shared implementation
-
-These paths are shared with `swift-library/github-workflows` and must remain
-byte-for-byte identical:
-
-- `.github/workflows/{swift-package,swift-package-release,policy,organization}.yml`
-- `.github/actionlint.yaml`, `.swift-format`, `requirements.txt`
-- `actions/`, `schemas/`, `tests/`
-- `scripts/`, except the agents-family `scripts/check-homebrew`
-- `fixtures/`, except the agents-family `fixtures/homebrew/`
-
-The root `.github/swift-package.json` also uses the same passing fixture
-configuration. The agents-family additions are Homebrew validation and its
-fixtures, the CI call and required aggregate dependency, and member examples.
-Both self-policy callers enable the authenticated Dependabot exception.
-
-For a local sibling checkout in `$SHARED_SOURCE`, verify the shared paths:
-
-```sh
-for path in swift-package swift-package-release policy organization; do
-  diff -r "$SHARED_SOURCE/.github/workflows/$path.yml" ".github/workflows/$path.yml"
-done
-for path in .github/actionlint.yaml .swift-format requirements.txt actions schemas tests; do
-  diff -r "$SHARED_SOURCE/$path" "$path"
-done
-diff -r --exclude=check-homebrew "$SHARED_SOURCE/scripts" scripts
-diff -r --exclude=homebrew "$SHARED_SOURCE/fixtures" fixtures
-```
+On drift, the action writes the regenerated `recording.json` to a dedicated
+runner temporary directory. The failed matrix entry uploads it as a
+`demo-recording-<execution>-<index>` artifact retained for seven days. Download and
+commit that file beside the script when the output change is intended.
 
 ## Local validation
 
@@ -233,8 +241,8 @@ python3 -m venv .build/venv
 . .build/venv/bin/activate
 python3 -m pip install -r requirements.txt
 actionlint
-python3 -B -m unittest discover -s tests
-python3 -B -m unittest discover -s fixtures/homebrew
+python3 -m unittest discover -s tests
+python3 -m unittest discover -s fixtures/homebrew
 python3 scripts/swift_package_config.py --root fixtures/passing
 python3 scripts/test-fixtures.py macos
 python3 scripts/test-fixtures.py apple
@@ -268,30 +276,27 @@ in a pull request. Recorder tests cover both namespaces, nested fixture paths,
 empty taps, changes/deletions/renames, existing registrations and each failing
 Homebrew command.
 
-macOS runs require Xcode/Swift; Linux fixture runs require Docker. The unit suite
-validates every package fixture and member migration configuration against the
-schema, exercises compiler matrices, version/tag trust, policy, organization
-API responses and aggregate failure behavior. The command harness requires
-passing fixtures to succeed and negative fixtures to fail for their intended
-reason. Builds and logs live under ignored `.build/`.
-The macOS fixtures include two documented targets with a dependency and a
-cross-module extension. The Apple fixtures include an iOS library that consumes
-Swift source generated by a local build tool plugin.
+macOS runs require Xcode/Swift; Linux fixture runs require Docker. The unit
+suite validates every package fixture against the schema, exercises compiler
+matrices, version/tag trust, policy, organization API responses and aggregate
+failure behavior. The command harness requires passing fixtures to succeed and
+negative fixtures to fail for their intended reason. Builds and logs live under
+ignored `.build/`.
+The macOS fixtures include documented library and executable targets with
+dependencies, a cross-module extension and trait-gated API. The Apple fixtures
+include an iOS library that consumes Swift source generated by a local build
+tool plugin.
 The demo fixtures build both release executables and check their recordings with
 the pinned toolchain. `passing` must match; `demo-drift` must exit 1 with a
 changed-step diagnostic and recording diff. Build and toolchain errors fail the
 harness. Regenerate the passing recording with the same toolchain's
 `node <toolchain>/src/cli.ts terminal record --script <script.yml> --executable <built-cli> --out <recording.json>`.
 
-CI calls the validation workflow using the root configuration targeting
-`fixtures/passing`, including its demo, and calls the policy and Homebrew workflows. Because the public validation
-workflow accepts no fixture override, the command harness exercises the same
-scripts against each failing package on its matching runner. Unit tests invoke
-the release and organization scripts against invalid fixture inputs and assert
-both the exit status and diagnostic. The CI aggregate requires every dependency
-to succeed. Signed release and organization success behavior is exercised through
-local Git/API fixtures in the unit tests. Successful remote publication and live
-administrative checks require dedicated authorized fixture repositories and credentials.
-
-After local runs, deactivate the venv and remove `.build/` (including the venv,
-fixture builds, logs and any downloaded presentation toolchain).
+CI calls the validation and policy workflows with passing fixture packages.
+The root configuration targets `fixtures/passing` and declares every validation
+job type. The scripts exercise each job's rejection path against failing
+fixtures on its matching runner. A failing reusable-workflow call cannot be an
+expected outcome without failing the run. Release and organization workflows
+are covered by actionlint and unit tests and exercised by their consumers;
+CI does not call them. CI also calls the Homebrew workflow against its fixture tap.
+The CI aggregate requires every dependency to succeed.

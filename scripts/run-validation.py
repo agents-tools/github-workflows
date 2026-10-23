@@ -25,8 +25,7 @@ def swift_flags(config, traits=None):
     if 'build_system' in config:
         flags += ['--build-system', config['build_system']]
     if traits is not None:
-        # The contract calls the default set "default"; SwiftPM spells it "defaults".
-        flags += ['--traits', ','.join('defaults' if item == 'default' else item for item in traits)] if traits else ['--disable-default-traits']
+        flags += ['--traits', ','.join(traits)] if traits else ['--disable-default-traits']
     return flags
 
 
@@ -84,8 +83,13 @@ def execute(root, job, entry, config=None):
             if job == 'compiler':
                 run(['swift', 'build', '-c', 'release', *flags], package, environment)
     elif job == 'format':
+        paths = [inside(package, path) for path in config.get('format', {}).get(
+            'paths', ['Package.swift', 'Sources', 'Tests'])]
+        for path in paths:
+            if not path.exists():
+                raise ValueError('Formatting path does not exist: ' + str(path))
         run(['swift', 'format', 'lint', '--strict', '--recursive', '--configuration',
-             str(root / '.swift-format'), *config.get('format', {}).get('paths', ['Package.swift', 'Sources', 'Tests'])], package, environment)
+             str(root / '.swift-format'), '--', *paths], package, environment)
     elif job == 'apple':
         command = [*XCODEBUILD, '-scheme', entry['scheme'], '-derivedDataPath', str(package / '.build/apple'),
                    '-destination', 'generic/platform=' + entry['platform'], 'CODE_SIGNING_ALLOWED=NO']
@@ -99,24 +103,28 @@ def execute(root, job, entry, config=None):
             finally:
                 run(['xcrun', 'simctl', 'delete', device], package, environment)
     elif job == 'docs':
-        description = json.loads(run(['swift', 'package', 'describe', '--type', 'json'],
+        description = json.loads(run(['swift', 'package', *swift_flags(config), 'describe', '--type', 'json'],
                                      package, environment, capture=True))
-        modules = {target['name']: target['c99name'] for target in description['targets']}
+        targets = {target['name']: target for target in description['targets']}
+        all_symbols = package / '.build/symbol-graphs'
+        all_symbols.mkdir(parents=True, exist_ok=True)
+        run(['swift', 'build', *swift_flags(config, config['docs'].get('traits')),
+             '-Xswiftc', '-emit-symbol-graph', '-Xswiftc', '-emit-symbol-graph-dir',
+             '-Xswiftc', all_symbols, '-Xswiftc', '-emit-extension-block-symbols'], package, environment)
         for target in config['docs']['targets']:
             output = package / '.build/docc' / target
-            all_symbols = output / 'all-symbols'
-            all_symbols.mkdir(parents=True, exist_ok=True)
-            run(['swift', 'build', '--target', target, *swift_flags(config), '-Xswiftc', '-emit-symbol-graph',
-                 '-Xswiftc', '-emit-symbol-graph-dir', '-Xswiftc', str(all_symbols)], package, environment)
             # SwiftPM also emits dependency graphs; each DocC conversion owns one module.
             symbols = output / 'symbols'
             if symbols.exists():
                 shutil.rmtree(symbols)
-            symbols.mkdir()
-            module = modules[target]
-            for graph in [all_symbols / (module + '.symbols.json'), *all_symbols.glob(module + '@*.symbols.json')]:
+            symbols.mkdir(parents=True)
+            module = targets[target]['c99name']
+            main_graph = all_symbols / (module + '.symbols.json')
+            if not main_graph.is_file():
+                raise ValueError('No main symbol graph for documentation target: ' + target)
+            for graph in [main_graph, *all_symbols.glob(module + '@*.symbols.json')]:
                 shutil.copyfile(graph, symbols / graph.name)
-            catalogs = list((package / 'Sources' / target).glob('*.docc'))
+            catalogs = list(inside(package, targets[target]['path']).glob('*.docc'))
             if len(catalogs) > 1:
                 raise ValueError('Expected at most one documentation catalog per target')
             run(['xcrun', 'docc', 'convert', *catalogs, '--additional-symbol-graph-dir', symbols,
