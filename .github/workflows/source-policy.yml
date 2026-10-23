@@ -1,0 +1,19 @@
+name: Source policy
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  policy:
+    uses: ./.github/workflows/policy.yml
+    with:
+      allow-terms: 'ChatGPT
+
+        Codex
+
+        Cursor
+
+        Claude'
+      dependabot-exception: true

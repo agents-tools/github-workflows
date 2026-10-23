@@ -1,0 +1,45 @@
+name: Homebrew
+on:
+  workflow_call:
+    inputs:
+      tap:
+        description: Homebrew namespace, such as agents-tools/tap or skill-cli/tap
+        type: string
+        required: true
+      tap-directory:
+        description: Tap directory inside the caller checkout
+        type: string
+        default: .
+permissions: {}
+jobs:
+  homebrew:
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: member
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .shared
+          persist-credentials: false
+      - name: Validate formulae and test pull request changes
+        working-directory: member/${{ inputs.tap-directory }}
+        shell: bash
+        env:
+          TAP: ${{ inputs.tap }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          arguments=("$TAP")
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            arguments+=("$BASE_SHA" "$HEAD_SHA")
+          fi
+          bash "$GITHUB_WORKSPACE/.shared/scripts/check-homebrew" "${arguments[@]}"
