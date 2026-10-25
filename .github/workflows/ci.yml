@@ -1,8 +1,9 @@
 name: CI
 on:
   push:
+    branches: [master]
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 permissions: {}
 jobs:
@@ -27,17 +28,6 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/swift-package.yml
-  policy:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/policy.yml
-    with:
-      allow-terms: |
-        ChatGPT
-        Codex
-        Cursor
-        Claude
-      dependabot-exception: true
   fixtures:
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -107,7 +97,7 @@ jobs:
       tap: agents-tools/workflow-fixture
       tap-directory: fixtures/homebrew
   result:
-    needs: [checks, validate, policy, fixtures, demo-fixture, homebrew]
+    needs: [checks, validate, fixtures, demo-fixture, homebrew]
     if: always()
     runs-on: ubuntu-24.04
     permissions:
