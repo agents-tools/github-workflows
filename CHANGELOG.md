@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.1
+
 - `policy.yml` accepts the agents CLI's tracked instruction files:
   `.agent/instructions/`, `.agent/agents.json` and `.agent/agents.resolved`.
   Other `.agent/` paths, including private directories nested under the
