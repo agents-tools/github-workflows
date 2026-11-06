@@ -143,8 +143,16 @@ Use `tap: skill-cli/tap` for the skill-cli tap. `tap` is a required lowercase
 with a 30-minute timeout. The checkout is temporarily registered under that
 namespace, and an existing registration fails without being replaced.
 
-Every run executes `brew style` and `brew audit --strict` for each
-`Formula/*.rb`. Pull requests compare the base and head through their merge
+For Homebrew's [tap trust](https://docs.brew.sh/Tap-Trust), the script grants
+`brew trust --formula` only to the enumerated `Formula/*.rb` names, using their
+fully qualified namespace. It uses a fresh temporary `XDG_CONFIG_HOME` for all
+validation commands, leaving existing user trust and configuration files
+unchanged. The trust directory and temporary tap link are removed on success
+or failure. No whole-tap permission is granted. This applies to both tap
+consumers, the CI fixture and local script invocations.
+
+After those grants, every run executes `brew style` and `brew audit --strict`
+for each `Formula/*.rb`. Pull requests compare the base and head through their merge
 base, then run `brew install --build-from-source` and `brew test` for changed
 formulae that still exist. Deletions are skipped. Empty taps succeed with a
 notice. Auto-update, analytics and installation from the API are disabled.
@@ -290,14 +298,16 @@ bash /path/to/github-workflows/scripts/check-homebrew agents-tools/tap
 bash /path/to/github-workflows/scripts/check-homebrew agents-tools/tap BASE HEAD
 ```
 
-The script temporarily registers the tap in Homebrew and removes that link on
-exit. Use an unregistered namespace. Source-install runs modify the Homebrew
-installation; the unit tests use an isolated recorder instead. The fixture tap
+The script temporarily registers the tap in Homebrew and removes that link and
+its isolated trust configuration on exit. Use an unregistered namespace.
+Source-install runs modify the Homebrew installation; the unit tests use an
+isolated recorder instead. The fixture tap
 contains a checksum-pinned GNU Hello formula. CI calls the reusable Homebrew
 workflow against it, including source installation when the formula changes
 in a pull request. Recorder tests cover both namespaces, nested fixture paths,
-empty taps, changes/deletions/renames, existing registrations and each failing
-Homebrew command.
+empty taps, changes/deletions/renames, existing registrations, formula-specific
+trust before validation, preservation of user configuration and cleanup after
+each failing Homebrew command.
 
 macOS runs require Xcode/Swift; Linux fixture runs require Docker. The unit
 suite validates every package fixture against the schema, exercises compiler
