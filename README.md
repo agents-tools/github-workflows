@@ -118,10 +118,12 @@ jobs:
 ```
 
 `allow-terms` is a newline-separated, case-insensitive product-name allowlist.
-It does not exempt attribution or private execution paths. The optional
-Dependabot exception permits only its exact signoff after GitHub authenticates
-the verified bot author and web-flow signer. Policy retains the family owner
-identity `10173746+showxu@users.noreply.github.com` and GitHub's web committer.
+It does not exempt attribution or private execution paths. The checker recognizes
+official documentation references in source and checks the surrounding text for
+attribution. The optional Dependabot exception permits only its exact signoff
+after GitHub authenticates the verified bot author and web-flow signer. Policy
+retains the family owner identity `10173746+showxu@users.noreply.github.com`
+and GitHub's web committer.
 
 ## Calling Homebrew validation
 
