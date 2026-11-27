@@ -32,13 +32,22 @@ if [[ -e "$tap_directory" || -L "$tap_directory" ]]; then
   echo "Tap already exists: $tap" >&2
   exit 1
 fi
+trust_directory="$(mktemp -d "${TMPDIR:-/tmp}/check-homebrew.XXXXXX")"
+trap 'rm -rf -- "$trust_directory"' EXIT
 mkdir -p "$(dirname "$tap_directory")"
 ln -s "$PWD" "$tap_directory"
-trap 'rm -- "$tap_directory"' EXIT
+trap 'rm -rf -- "$trust_directory"; rm -- "$tap_directory"' EXIT
+export XDG_CONFIG_HOME="$trust_directory"
 
+references=()
 for formula in "${formulae[@]}"; do
   name="${formula##*/}"
-  reference="$tap/${name%.rb}"
+  references+=("$tap/${name%.rb}")
+done
+# Audits may load other formulae in this checkout; grant the enumerated set first.
+brew trust --formula "${references[@]}"
+
+for reference in "${references[@]}"; do
   brew style "$reference"
   brew audit --strict "$reference"
 done

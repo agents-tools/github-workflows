@@ -26,6 +26,19 @@ class HomebrewTests(unittest.TestCase):
         self.brew_root = self.root / 'brew'
         self.link = self.brew_root / 'Library/Taps/agents-tools/homebrew-tap'
         self.log = self.root / 'calls.jsonl'
+        self.user_config = self.root / 'user-config'
+        self.user_home = self.root / 'user-home'
+        for directory in (self.user_config / 'homebrew', self.user_home / '.homebrew'):
+            directory.mkdir(parents=True)
+            (directory / 'trust.json').write_text('{"trustedtaps": ["someone/other"]}\n')
+            (directory / 'brew.env').write_text('# Existing user configuration\n')
+        self.prior_config = {path: path.read_bytes() for directory in (self.user_config, self.user_home)
+                             for path in directory.rglob('*') if path.is_file()}
+        self.temporary = self.root / 'temporary files'
+        self.temporary.mkdir()
+        self.other_link = self.brew_root / 'Library/Taps/someone/homebrew-other'
+        self.other_link.mkdir(parents=True)
+        (self.other_link / 'keep').write_text('unrelated tap\n')
         binary = self.root / 'bin'
         binary.mkdir()
         recorder = binary / 'brew'
@@ -38,16 +51,33 @@ else:
     assert link.resolve() == Path.cwd()
     assert all(os.environ[key] == '1' for key in (
         'HOMEBREW_NO_AUTO_UPDATE', 'HOMEBREW_NO_INSTALL_FROM_API', 'HOMEBREW_NO_ANALYTICS'))
+    config = Path(os.environ['XDG_CONFIG_HOME'])
+    assert config.parent == Path(os.environ['TMPDIR'])
+    assert config.stat().st_mode & 0o777 == 0o700
+    store = config / 'homebrew/trust.json'
+    trust = json.loads(store.read_text()) if store.exists() else {}
+    if sys.argv[1] == 'trust':
+        assert sys.argv[2] == '--formula'
+        for reference in sys.argv[3:]:
+            trust.setdefault('trustedformulae', []).append(reference)
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_text(json.dumps(trust))
+            if os.environ.get('FAIL_COMMAND') == 'trust':
+                break
+    else:
+        assert sys.argv[-1] in trust.get('trustedformulae', [])
     with open(os.environ['BREW_LOG'], 'a') as stream:
-        stream.write(json.dumps(sys.argv[1:]) + '\\n')
+        stream.write(json.dumps({'arguments': sys.argv[1:], 'config': str(config), 'trust': trust}) + '\\n')
     if sys.argv[1] == os.environ.get('FAIL_COMMAND'):
         sys.exit(1)
 ''')
         recorder.chmod(0o755)
-        self.env = {**os.environ, 'PATH': f'{binary}:{os.environ["PATH"]}',
+        environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        self.env = {**environment, 'PATH': f'{binary}:{os.environ["PATH"]}',
                     'BREW_ROOT': str(self.brew_root), 'BREW_LINK': str(self.link),
                     'BREW_LOG': str(self.log), 'GIT_CONFIG_GLOBAL': os.devnull,
-                    'GIT_CONFIG_NOSYSTEM': '1'}
+                    'GIT_CONFIG_NOSYSTEM': '1', 'HOME': str(self.user_home),
+                    'XDG_CONFIG_HOME': str(self.user_config), 'TMPDIR': str(self.temporary)}
         self.git('init', '-q')
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.com')
@@ -66,16 +96,50 @@ else:
         result = subprocess.run(['bash', str(SCRIPT), tap, *revisions], cwd=self.tap,
                                 env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        records = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        for record in records:
+            self.assertFalse(Path(record['config']).exists(), 'temporary trust configuration leaked')
+        self.assertEqual(list(self.temporary.iterdir()), [])
+        current_config = {path: path.read_bytes() for directory in (self.user_config, self.user_home)
+                          for path in directory.rglob('*') if path.is_file()}
+        self.assertEqual(current_config, self.prior_config)
+        self.assertEqual((self.other_link / 'keep').read_text(), 'unrelated tap\n')
+        return [record['arguments'] for record in records]
 
     def validation_calls(self, namespace='agents-tools/tap'):
-        return [[command, *flags, f'{namespace}/{name}']
+        return [['trust', '--formula', f'{namespace}/unchanged', f'{namespace}/workflow-hello']] + [
+                [command, *flags, f'{namespace}/{name}']
                 for name in ('unchanged', 'workflow-hello')
                 for command, flags in (('style', []), ('audit', ['--strict']))]
 
     def test_push_validates_every_formula_and_removes_registration(self):
         self.assertEqual(self.run_check(), self.validation_calls())
         self.assertFalse(self.link.is_symlink())
+
+    def test_trust_grants_only_enumerated_formulae_before_any_validation(self):
+        (self.tap / 'Casks').mkdir()
+        (self.tap / 'Casks/unrelated.rb').write_text('# Not a formula\n')
+        (self.tap / 'cmd').mkdir()
+        (self.tap / 'cmd/brew-unrelated.rb').write_text('# Not a formula\n')
+        (self.tap / 'Formula/extra.rb').write_text('# Another audited formula\n')
+        calls = self.run_check()
+        expected = {f'agents-tools/tap/{name}' for name in ('extra', 'unchanged', 'workflow-hello')}
+        self.assertEqual(calls[0][:2], ['trust', '--formula'])
+        self.assertEqual(set(calls[0][2:]), expected)
+        records = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(len({record['config'] for record in records}), 1)
+        for record in records:
+            self.assertEqual(record['trust'], {'trustedformulae': sorted(expected)})
+        self.assertEqual({call[-1] for call in calls if call[0] == 'audit'}, expected)
+
+    def test_each_invocation_uses_a_fresh_store_without_xdg_configuration(self):
+        del self.env['XDG_CONFIG_HOME']
+        self.run_check()
+        first = json.loads(self.log.read_text().splitlines()[0])['config']
+        self.log.unlink()
+        self.run_check()
+        second = json.loads(self.log.read_text().splitlines()[0])['config']
+        self.assertNotEqual(first, second)
 
     def test_second_caller_namespace(self):
         self.link = self.brew_root / 'Library/Taps/skill-cli/homebrew-tap'
@@ -119,14 +183,14 @@ else:
     def test_empty_tap_succeeds_without_brew(self):
         shutil.rmtree(self.tap / 'Formula')
         self.assertEqual(self.run_check(), [])
-        self.assertFalse(self.brew_root.exists())
+        self.assertFalse(self.link.exists())
 
     def test_invalid_namespace_or_revisions_fail_before_brew(self):
         for namespace in ('../tap', 'agents-tools/../../tap', '-bad/tap', 'owner/tap/extra'):
             with self.subTest(namespace=namespace):
                 self.assertEqual(self.run_check(tap=namespace, status=2), [])
         self.run_check(self.base, 'missing', status=128)
-        self.assertFalse(self.brew_root.exists())
+        self.assertFalse(self.link.exists())
 
     def test_existing_registration_is_preserved(self):
         self.link.mkdir(parents=True)
@@ -137,7 +201,7 @@ else:
         with (self.tap / 'Formula/workflow-hello.rb').open('a') as stream:
             stream.write('# Change\n')
         head = self.commit()
-        for command in ('style', 'audit', 'install', 'test'):
+        for command in ('trust', 'style', 'audit', 'install', 'test'):
             with self.subTest(command=command):
                 self.log.unlink(missing_ok=True)
                 self.env['FAIL_COMMAND'] = command
